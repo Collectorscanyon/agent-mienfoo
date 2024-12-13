@@ -1,11 +1,7 @@
 const { NeynarAPIClient, Configuration } = require('@neynar/nodejs-sdk');
 const { OpenAI } = require('openai');
-const QuickLRU = require('quick-lru'); 
+const { initializeCaches } = require('./cache.js');
 const crypto = require('crypto');
-
-// Initialize LRU caches
-const responseCache = new QuickLRU({ maxSize: 500, maxAge: 5 * 60 * 1000 }); // 5 minutes
-const processedCasts = new QuickLRU({ maxSize: 1000, maxAge: 10 * 60 * 1000 }); // 10 minutes
 
 // Rate limiting
 const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
@@ -135,6 +131,22 @@ async function generateBotResponse(text, requestId) {
     return "Like a rare Pokémon card, the right words seem to be eluding me. Could you try asking again? /collectorscanyon";
   }
 }
+
+let responseCache;
+let processedCasts;
+
+// Initialize caches before using them
+async function initialize() {
+  const caches = await initializeCaches();
+  responseCache = caches.responseCache;
+  processedCasts = caches.processedCasts;
+}
+
+// Call initialize at startup
+initialize().catch(error => {
+  console.error('Failed to initialize caches:', error);
+  process.exit(1);
+});
 
 const handler = async (req, res) => {
   const requestId = crypto.randomBytes(4).toString('hex');

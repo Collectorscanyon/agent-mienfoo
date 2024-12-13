@@ -4,6 +4,7 @@
   "main": "index.js",
   "dependencies": {
     "@neynar/nodejs-sdk": "latest",
-    "openai": "^4.0.0"
+    "openai": "^4.0.0",
+    "quick-lru": "^6.1.2"
   }
 }
