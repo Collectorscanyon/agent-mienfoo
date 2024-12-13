@@ -2,6 +2,7 @@ const { NeynarAPIClient, Configuration } = require('@neynar/nodejs-sdk');
 const { OpenAI } = require('openai');
 const { initializeCaches } = require('./cache.js');
 const crypto = require('crypto');
+const getRawBody = require('raw-body');
 
 // Rate limiting
 const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
@@ -40,7 +41,15 @@ const requiredEnvVars = [
   'SIGNER_UUID'
 ];
 
-const missingEnvVars = requiredEnvVars.filter(key => !process.env[key]);
+const missingEnvVars = requiredEnvVars.filter(key => {
+  const value = process.env[key];
+  if (!value) {
+    console.warn(`Missing environment variable: ${key}`);
+    return true;
+  }
+  return false;
+});
+
 if (missingEnvVars.length > 0) {
   throw new Error(`Missing required environment variables: ${missingEnvVars.join(', ')}`);
 }
@@ -64,9 +73,28 @@ const openai = new OpenAI({
 
 // Verify webhook signature
 function verifySignature(signature, body) {
-  const hmac = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET);
-  const digest = hmac.update(body).digest('hex');
-  return signature === digest;
+  try {
+    if (!signature || !process.env.WEBHOOK_SECRET) {
+      console.warn('Missing signature or webhook secret');
+      return false;
+    }
+
+    const hmac = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET);
+    const digest = hmac.update(body).digest('hex');
+    const isValid = signature === digest;
+
+    if (!isValid) {
+      console.warn('Signature validation failed:', {
+        receivedSignature: signature,
+        calculatedDigest: digest
+      });
+    }
+
+    return isValid;
+  } catch (error) {
+    console.error('Error verifying signature:', error);
+    return false;
+  }
 }
 
 async function generateBotResponse(text, requestId) {
@@ -148,6 +176,26 @@ initialize().catch(error => {
   process.exit(1);
 });
 
+// Add this function to get raw body
+async function getRequestBody(req) {
+  if (req.body) {
+    return JSON.stringify(req.body);
+  }
+  
+  try {
+    const rawBody = await getRawBody(req, {
+      length: req.headers['content-length'],
+      limit: '1mb',
+      encoding: true
+    });
+    return rawBody;
+  } catch (error) {
+    console.error('Error reading raw body:', error);
+    throw error;
+  }
+}
+
+// Update the handler function
 const handler = async (req, res) => {
   const requestId = crypto.randomBytes(4).toString('hex');
   const timestamp = new Date().toISOString();
@@ -214,8 +262,40 @@ const handler = async (req, res) => {
     // Verify signature in production
     if (process.env.NODE_ENV === 'production') {
       const signature = req.headers['x-neynar-signature'];
-      if (!signature || !verifySignature(signature, JSON.stringify(req.body))) {
-        return res.status(401).json({ error: 'Invalid signature' });
+      const rawBody = await getRequestBody(req);
+      
+      console.log('Webhook Debug:', {
+        requestId,
+        timestamp,
+        headers: {
+          signature,
+          contentType: req.headers['content-type'],
+          contentLength: req.headers['content-length']
+        },
+        bodyPreview: {
+          length: rawBody.length,
+          snippet: rawBody.substring(0, 100) + '...'
+        }
+      });
+      
+      if (!verifySignature(signature, rawBody)) {
+        console.warn('Signature verification failed:', {
+          requestId,
+          signature,
+          bodyLength: rawBody.length,
+          webhookSecret: process.env.WEBHOOK_SECRET ? '(set)' : '(missing)'
+        });
+        
+        return res.status(401).json({ 
+          error: 'Invalid signature',
+          requestId,
+          debug: process.env.NODE_ENV !== 'production'
+        });
+      }
+
+      // Parse the raw body if needed
+      if (typeof rawBody === 'string') {
+        req.body = JSON.parse(rawBody);
       }
     }
 

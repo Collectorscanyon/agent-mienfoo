@@ -5,6 +5,8 @@
   "dependencies": {
     "@neynar/nodejs-sdk": "latest",
     "openai": "^4.0.0",
-    "quick-lru": "^6.1.2"
+    "quick-lru": "^6.1.2",
+    "raw-body": "^2.5.2"
   }
 }
+
