@@ -71,7 +71,45 @@ const openai = new OpenAI({
   timeout: 30000
 });
 
-// Verify webhook signature
+// Add constants at the top with other constants
+const HMAC_ALGORITHM = 'sha256';
+const MAX_BODY_SIZE = '5mb';
+const CONTENT_TYPES = {
+  JSON: 'application/json',
+  FORM: 'application/x-www-form-urlencoded',
+  TEXT: 'text/plain'
+};
+
+// Helper function to convert body to string based on content type
+function bodyToString(body, contentType) {
+  try {
+    if (Buffer.isBuffer(body)) {
+      return body.toString('utf8');
+    }
+    if (typeof body === 'string') {
+      return body;
+    }
+    
+    switch(contentType) {
+      case CONTENT_TYPES.JSON:
+        return JSON.stringify(body);
+      case CONTENT_TYPES.FORM:
+        return new URLSearchParams(body).toString();
+      default:
+        return JSON.stringify(body);
+    }
+  } catch (error) {
+    console.error('Error converting body to string:', {
+      error: error.message,
+      bodyType: typeof body,
+      contentType,
+      isBuffer: Buffer.isBuffer(body)
+    });
+    throw error;
+  }
+}
+
+// Verify webhook signature with timing-safe comparison
 function verifySignature(signature, body) {
   try {
     if (!signature || !process.env.WEBHOOK_SECRET) {
@@ -83,6 +121,11 @@ function verifySignature(signature, body) {
       return false;
     }
 
+    // Convert body to string if it's a Buffer
+    const bodyString = Buffer.isBuffer(body) ? body.toString('utf8') : 
+                      typeof body === 'string' ? body :
+                      JSON.stringify(body);
+
     // Enhanced debug logging
     console.log('Signature Debug:', {
       receivedSignature: {
@@ -91,34 +134,33 @@ function verifySignature(signature, body) {
         encoding: 'hex'
       },
       body: {
-        length: body.length,
-        encoding: Buffer.isBuffer(body) ? 'buffer' : typeof body,
-        preview: body.substring(0, 50) + '...'
-      },
-      webhookSecret: {
-        length: process.env.WEBHOOK_SECRET.length,
-        isSet: !!process.env.WEBHOOK_SECRET
+        type: typeof bodyString,
+        length: bodyString.length,
+        preview: bodyString.substring(0, 50) + '...'
       }
     });
 
-    const hmac = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET);
-    const digest = hmac.update(body).digest('hex');
+    const hmac = crypto.createHmac(HMAC_ALGORITHM, process.env.WEBHOOK_SECRET);
+    const digest = hmac.update(bodyString).digest('hex');
 
-    // Log comparison details
+    // Use timing-safe comparison
+    const isValid = crypto.timingSafeEqual(
+      Buffer.from(signature, 'hex'),
+      Buffer.from(digest, 'hex')
+    );
+
     console.log('Signature Comparison:', {
-      received: signature,
-      computed: digest,
-      match: signature === digest,
-      bodyHash: crypto.createHash('sha256').update(body).digest('hex').substring(0, 8) + '...'
+      match: isValid,
+      bodyHash: crypto.createHash(HMAC_ALGORITHM).update(bodyString).digest('hex').substring(0, 8) + '...'
     });
 
-    return signature === digest;
+    return isValid;
   } catch (error) {
     console.error('Signature verification error:', {
       error: error.message,
       stack: error.stack,
       bodyType: typeof body,
-      bodyLength: body?.length
+      isBuffer: Buffer.isBuffer(body)
     });
     return false;
   }
@@ -203,36 +245,56 @@ initialize().catch(error => {
   process.exit(1);
 });
 
-// Update the getRequestBody function to be more precise
+// Update the getRequestBody function
 async function getRequestBody(req) {
   try {
-    // If we already have the raw body, return it
     if (req.rawBody) {
       return req.rawBody;
     }
-    
-    // Get the raw body as a Buffer
-    const rawBody = await getRawBody(req, {
-      length: req.headers['content-length'],
-      limit: '5mb',
-      encoding: null // Get raw buffer instead of string
+
+    const contentType = req.headers['content-type'] || CONTENT_TYPES.JSON;
+    const contentLength = req.headers['content-length'];
+
+    console.log('Content-Type Debug:', {
+      received: contentType,
+      isJson: contentType.includes(CONTENT_TYPES.JSON),
+      isForm: contentType.includes(CONTENT_TYPES.FORM),
+      contentLength: contentLength || 'not specified'
     });
-    
-    // Store the raw body for potential reuse
-    req.rawBody = rawBody;
-    
-    // Log the raw body details for debugging
-    console.log('Raw body details:', {
-      type: 'Buffer',
-      length: rawBody.length,
-      encoding: req.headers['content-type'],
-      preview: rawBody.toString('utf8').substring(0, 50) + '...'
-    });
-    
-    return rawBody;
+
+    try {
+      const rawBody = await getRawBody(req, {
+        length: contentLength || undefined,
+        limit: MAX_BODY_SIZE,
+        encoding: null
+      });
+
+      req.rawBody = rawBody;
+      req.rawBodyString = rawBody.toString('utf8');
+
+      console.log('Raw body details:', {
+        type: 'Buffer',
+        length: rawBody.length,
+        contentType,
+        preview: req.rawBodyString.substring(0, 50) + '...'
+      });
+
+      return rawBody;
+    } catch (error) {
+      if (error.type === 'entity.too.large') {
+        console.error('Payload size error:', {
+          limit: MAX_BODY_SIZE,
+          received: contentLength,
+          type: contentType
+        });
+        throw new Error(`Payload size exceeds limit of ${MAX_BODY_SIZE}`);
+      }
+      throw error;
+    }
   } catch (error) {
-    console.error('Error reading raw body:', {
+    console.error('Error processing request body:', {
       error: error.message,
+      stack: error.stack,
       headers: {
         'content-type': req.headers['content-type'],
         'content-length': req.headers['content-length']
@@ -308,51 +370,59 @@ const handler = async (req, res) => {
   try {
     // Verify signature in production
     if (process.env.NODE_ENV === 'production') {
-      const signature = req.headers['x-neynar-signature'];
-      const rawBody = await getRequestBody(req);
-      
-      // Log complete request details
-      console.log('Webhook request details:', {
-        requestId,
-        method: req.method,
-        headers: {
-          'x-neynar-signature': signature,
-          'content-type': req.headers['content-type'],
-          'content-length': req.headers['content-length'],
-          'accept': req.headers['accept']
-        },
-        body: {
-          type: Buffer.isBuffer(rawBody) ? 'Buffer' : typeof rawBody,
-          length: rawBody?.length,
-          preview: Buffer.isBuffer(rawBody) ? 
-            rawBody.toString('utf8').substring(0, 100) + '...' : 
-            String(rawBody).substring(0, 100) + '...'
-        }
-      });
-      
-      if (!verifySignature(signature, rawBody)) {
-        return res.status(401).json({
-          error: 'Invalid signature',
-          requestId,
-          timestamp: new Date().toISOString(),
-          debug: {
-            hasSignature: !!signature,
-            bodyLength: rawBody?.length,
-            contentType: req.headers['content-type']
-          }
-        });
-      }
-
-      // Parse the raw body after verification
       try {
-        req.body = JSON.parse(Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : rawBody);
+        const signature = req.headers['x-neynar-signature'];
+        const contentType = req.headers['content-type'] || CONTENT_TYPES.JSON;
+        
+        let rawBody;
+        try {
+          rawBody = await getRequestBody(req);
+        } catch (error) {
+          if (error.message.includes('Payload size exceeds limit')) {
+            return res.status(413).json({
+              error: 'Payload too large',
+              limit: MAX_BODY_SIZE
+            });
+          }
+          throw error;
+        }
+
+        if (!verifySignature(signature, rawBody)) {
+          return res.status(401).json({
+            error: 'Invalid signature',
+            requestId,
+            timestamp: new Date().toISOString(),
+            debug: {
+              hasSignature: !!signature,
+              bodyLength: rawBody?.length,
+              contentType
+            }
+          });
+        }
+
+        // Parse body based on content type
+        try {
+          if (contentType.includes(CONTENT_TYPES.JSON)) {
+            req.body = JSON.parse(rawBody.toString('utf8'));
+          } else if (contentType.includes(CONTENT_TYPES.FORM)) {
+            const params = new URLSearchParams(rawBody.toString('utf8'));
+            req.body = Object.fromEntries(params);
+          }
+        } catch (error) {
+          console.error('Body parsing error:', {
+            error: error.message,
+            contentType,
+            bodyPreview: rawBody.toString('utf8').substring(0, 100)
+          });
+          return res.status(400).json({ error: 'Invalid request body' });
+        }
       } catch (error) {
-        console.error('Error parsing body:', {
+        console.error('Webhook processing error:', {
           error: error.message,
-          bodyType: typeof rawBody,
-          isBuffer: Buffer.isBuffer(rawBody)
+          stack: error.stack,
+          requestId
         });
-        return res.status(400).json({ error: 'Invalid JSON body' });
+        return res.status(500).json({ error: 'Internal server error' });
       }
     }
 

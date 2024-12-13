@@ -4,9 +4,12 @@
   "main": "index.js",
   "dependencies": {
     "@neynar/nodejs-sdk": "latest",
+    "node-fetch": "^2.7.0",
     "openai": "^4.0.0",
     "quick-lru": "^6.1.2",
     "raw-body": "^2.5.2"
+  },
+  "scripts": {
+    "test:webhook": "node test-webhook.js"
   }
 }
-
