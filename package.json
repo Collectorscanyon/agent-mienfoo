@@ -1,0 +1,10 @@
+{
+  "name": "agent-mienfoo",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@neynar/nodejs-sdk": "latest",
+    "openai": "^4.0.0",
+    "crypto": "^1.0.1"
+  }
+}
