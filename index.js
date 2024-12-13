@@ -75,24 +75,51 @@ const openai = new OpenAI({
 function verifySignature(signature, body) {
   try {
     if (!signature || !process.env.WEBHOOK_SECRET) {
-      console.warn('Missing signature or webhook secret');
+      console.warn('Signature verification failed:', {
+        reason: 'Missing signature or webhook secret',
+        hasSignature: !!signature,
+        hasSecret: !!process.env.WEBHOOK_SECRET
+      });
       return false;
     }
 
+    // Enhanced debug logging
+    console.log('Signature Debug:', {
+      receivedSignature: {
+        value: signature,
+        length: signature.length,
+        encoding: 'hex'
+      },
+      body: {
+        length: body.length,
+        encoding: Buffer.isBuffer(body) ? 'buffer' : typeof body,
+        preview: body.substring(0, 50) + '...'
+      },
+      webhookSecret: {
+        length: process.env.WEBHOOK_SECRET.length,
+        isSet: !!process.env.WEBHOOK_SECRET
+      }
+    });
+
     const hmac = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET);
     const digest = hmac.update(body).digest('hex');
-    const isValid = signature === digest;
 
-    if (!isValid) {
-      console.warn('Signature validation failed:', {
-        receivedSignature: signature,
-        calculatedDigest: digest
-      });
-    }
+    // Log comparison details
+    console.log('Signature Comparison:', {
+      received: signature,
+      computed: digest,
+      match: signature === digest,
+      bodyHash: crypto.createHash('sha256').update(body).digest('hex').substring(0, 8) + '...'
+    });
 
-    return isValid;
+    return signature === digest;
   } catch (error) {
-    console.error('Error verifying signature:', error);
+    console.error('Signature verification error:', {
+      error: error.message,
+      stack: error.stack,
+      bodyType: typeof body,
+      bodyLength: body?.length
+    });
     return false;
   }
 }
@@ -176,21 +203,41 @@ initialize().catch(error => {
   process.exit(1);
 });
 
-// Add this function to get raw body
+// Update the getRequestBody function to be more precise
 async function getRequestBody(req) {
-  if (req.body) {
-    return JSON.stringify(req.body);
-  }
-  
   try {
+    // If we already have the raw body, return it
+    if (req.rawBody) {
+      return req.rawBody;
+    }
+    
+    // Get the raw body as a Buffer
     const rawBody = await getRawBody(req, {
       length: req.headers['content-length'],
-      limit: '1mb',
-      encoding: true
+      limit: '5mb',
+      encoding: null // Get raw buffer instead of string
     });
+    
+    // Store the raw body for potential reuse
+    req.rawBody = rawBody;
+    
+    // Log the raw body details for debugging
+    console.log('Raw body details:', {
+      type: 'Buffer',
+      length: rawBody.length,
+      encoding: req.headers['content-type'],
+      preview: rawBody.toString('utf8').substring(0, 50) + '...'
+    });
+    
     return rawBody;
   } catch (error) {
-    console.error('Error reading raw body:', error);
+    console.error('Error reading raw body:', {
+      error: error.message,
+      headers: {
+        'content-type': req.headers['content-type'],
+        'content-length': req.headers['content-length']
+      }
+    });
     throw error;
   }
 }
@@ -264,38 +311,48 @@ const handler = async (req, res) => {
       const signature = req.headers['x-neynar-signature'];
       const rawBody = await getRequestBody(req);
       
-      console.log('Webhook Debug:', {
+      // Log complete request details
+      console.log('Webhook request details:', {
         requestId,
-        timestamp,
+        method: req.method,
         headers: {
-          signature,
-          contentType: req.headers['content-type'],
-          contentLength: req.headers['content-length']
+          'x-neynar-signature': signature,
+          'content-type': req.headers['content-type'],
+          'content-length': req.headers['content-length'],
+          'accept': req.headers['accept']
         },
-        bodyPreview: {
-          length: rawBody.length,
-          snippet: rawBody.substring(0, 100) + '...'
+        body: {
+          type: Buffer.isBuffer(rawBody) ? 'Buffer' : typeof rawBody,
+          length: rawBody?.length,
+          preview: Buffer.isBuffer(rawBody) ? 
+            rawBody.toString('utf8').substring(0, 100) + '...' : 
+            String(rawBody).substring(0, 100) + '...'
         }
       });
       
       if (!verifySignature(signature, rawBody)) {
-        console.warn('Signature verification failed:', {
-          requestId,
-          signature,
-          bodyLength: rawBody.length,
-          webhookSecret: process.env.WEBHOOK_SECRET ? '(set)' : '(missing)'
-        });
-        
-        return res.status(401).json({ 
+        return res.status(401).json({
           error: 'Invalid signature',
           requestId,
-          debug: process.env.NODE_ENV !== 'production'
+          timestamp: new Date().toISOString(),
+          debug: {
+            hasSignature: !!signature,
+            bodyLength: rawBody?.length,
+            contentType: req.headers['content-type']
+          }
         });
       }
 
-      // Parse the raw body if needed
-      if (typeof rawBody === 'string') {
-        req.body = JSON.parse(rawBody);
+      // Parse the raw body after verification
+      try {
+        req.body = JSON.parse(Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : rawBody);
+      } catch (error) {
+        console.error('Error parsing body:', {
+          error: error.message,
+          bodyType: typeof rawBody,
+          isBuffer: Buffer.isBuffer(rawBody)
+        });
+        return res.status(400).json({ error: 'Invalid JSON body' });
       }
     }
 
