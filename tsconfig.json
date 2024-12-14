@@ -1,14 +1,20 @@
 {
   "compilerOptions": {
-    "target": "ES6",
-    "module": "commonjs",
-    "outDir": "./api",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "moduleResolution": "node"
+    "target": "ES2022", // Latest standard for async/await and modern features
+    "module": "NodeNext", // Use Node.js native ES module resolution
+    "outDir": "./dist", // Compiled files location
+    "rootDir": "./src", // Source files location
+    "strict": true, // Strict type checking for reliability
+    "esModuleInterop": true, // CommonJS module compatibility
+    "forceConsistentCasingInFileNames": true, // Enforce consistent casing
+    "skipLibCheck": true, // Skip library type checks for faster builds
+    "resolveJsonModule": true, // Allow importing JSON files
+    "moduleResolution": "NodeNext", // Updated to match "module" option
+    "allowSyntheticDefaultImports": true, // Enable synthetic default imports
+    "types": ["@types/node"], // Include Node.js types
+    "noImplicitAny": true, // Disallow implicit `any` type
+    "lib": ["ES2022"] // Include ES2022 library for latest features
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["node_modules"]
+  "include": ["src/**/*"], // Include all TypeScript files in the src directory
+  "exclude": ["node_modules", "dist"] // Exclude `node_modules` and compiled output
 }

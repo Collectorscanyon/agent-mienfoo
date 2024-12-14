@@ -1,27 +1,34 @@
 {
-  "name": "agent-mienfoo",
-  "version": "1.0.0",
-  "engines": {
-    "node": "22.x"
+  "version": 2,
+  "functions": {
+    "api/*.ts": {
+      "runtime": "@vercel/node@22.x",
+      "memory": 1024,
+      "maxDuration": 60
+    },
+    "api/*.js": {
+      "runtime": "@vercel/node@22.x"
+    }
   },
-  "main": "index.js",
-  "dependencies": {
-    "@neynar/nodejs-sdk": "latest",
-    "@types/express-rate-limit": "^5.1.3",
-    "dotenv": "^16.4.7",
-    "express-rate-limit": "^7.4.1",
-    "node-fetch": "^2.7.0",
-    "openai": "^4.0.0",
-    "quick-lru": "^6.1.2",
-    "raw-body": "^2.5.2"
-  },
-  "scripts": {
-    "build": "tsc",
-    "test:webhook": "node test/test-webhook.js",
-    "dev": "vercel dev",
-    "start": "node server.js"
-  },
-  "devDependencies": {
-    "@types/node": "^22.10.2"
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "X-Neynar-Signature, Content-Type" }
+      ]
+    }
+  ],
+  "rewrites": [
+    { "source": "/api/webhook", "destination": "/api/webhook" },
+    { "source": "/api/health", "destination": "/api/health" },
+    { "source": "/api/(.*)", "destination": "/api/$1" }
+  ],
+  "env": {
+    "NODE_ENV": "production"
   }
 }

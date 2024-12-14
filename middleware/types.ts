@@ -1,4 +1,4 @@
-import { Request } from 'express';
+import { Request } from "express";
 
 // Extend Express Request type to include our custom properties
 declare global {
@@ -8,4 +8,4 @@ declare global {
       startTime?: [number, number];
     }
   }
-} 
+}
