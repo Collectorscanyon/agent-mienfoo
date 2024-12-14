@@ -110,7 +110,7 @@ function bodyToString(body, contentType) {
 }
 
 // Verify webhook signature with timing-safe comparison
-function verifySignature(signature, body) {
+function verifySignature(signature, rawBody) {
   try {
     if (!signature || !process.env.WEBHOOK_SECRET) {
       console.warn('Signature verification failed:', {
@@ -121,46 +121,39 @@ function verifySignature(signature, body) {
       return false;
     }
 
-    // Convert body to string if it's a Buffer
-    const bodyString = Buffer.isBuffer(body) ? body.toString('utf8') : 
-                      typeof body === 'string' ? body :
-                      JSON.stringify(body);
+    // Log raw body details for debugging
+    console.log('Raw Body Details:', {
+      length: rawBody.length,
+      isBuffer: Buffer.isBuffer(rawBody),
+      encoding: 'utf-8',
+      preview: rawBody.toString('utf8').substring(0, 50) + '...'
+    });
 
-    // Enhanced debug logging
-    console.log('Signature Debug:', {
-      receivedSignature: {
+    // Ensure we're working with a Buffer
+    const bodyBuffer = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody);
+    
+    const hmac = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET);
+    const digest = hmac.update(bodyBuffer).digest('hex');
+
+    // Log signature details for debugging
+    console.log('Signature Details:', {
+      received: {
         value: signature,
-        length: signature.length,
-        encoding: 'hex'
+        length: signature.length
       },
-      body: {
-        type: typeof bodyString,
-        length: bodyString.length,
-        preview: bodyString.substring(0, 50) + '...'
+      computed: {
+        value: digest,
+        length: digest.length
       }
     });
 
-    const hmac = crypto.createHmac(HMAC_ALGORITHM, process.env.WEBHOOK_SECRET);
-    const digest = hmac.update(bodyString).digest('hex');
-
-    // Use timing-safe comparison
-    const isValid = crypto.timingSafeEqual(
-      Buffer.from(signature, 'hex'),
-      Buffer.from(digest, 'hex')
-    );
-
-    console.log('Signature Comparison:', {
-      match: isValid,
-      bodyHash: crypto.createHash(HMAC_ALGORITHM).update(bodyString).digest('hex').substring(0, 8) + '...'
-    });
-
-    return isValid;
+    return signature === digest;
   } catch (error) {
     console.error('Signature verification error:', {
       error: error.message,
       stack: error.stack,
-      bodyType: typeof body,
-      isBuffer: Buffer.isBuffer(body)
+      bodyType: typeof rawBody,
+      isBuffer: Buffer.isBuffer(rawBody)
     });
     return false;
   }
@@ -252,53 +245,27 @@ async function getRequestBody(req) {
       return req.rawBody;
     }
 
-    const contentType = req.headers['content-type'] || CONTENT_TYPES.JSON;
-    const contentLength = req.headers['content-length'];
-
-    console.log('Content-Type Debug:', {
-      received: contentType,
-      isJson: contentType.includes(CONTENT_TYPES.JSON),
-      isForm: contentType.includes(CONTENT_TYPES.FORM),
-      contentLength: contentLength || 'not specified'
+    // Get the raw body as a Buffer
+    const rawBody = await getRawBody(req, {
+      length: req.headers['content-length'],
+      limit: '1mb',
+      encoding: null // Get raw buffer
     });
 
-    try {
-      const rawBody = await getRawBody(req, {
-        length: contentLength || undefined,
-        limit: MAX_BODY_SIZE,
-        encoding: null
-      });
+    // Store the raw body
+    req.rawBody = rawBody;
 
-      req.rawBody = rawBody;
-      req.rawBodyString = rawBody.toString('utf8');
+    console.log('Request body captured:', {
+      length: rawBody.length,
+      contentType: req.headers['content-type'],
+      contentLength: req.headers['content-length']
+    });
 
-      console.log('Raw body details:', {
-        type: 'Buffer',
-        length: rawBody.length,
-        contentType,
-        preview: req.rawBodyString.substring(0, 50) + '...'
-      });
-
-      return rawBody;
-    } catch (error) {
-      if (error.type === 'entity.too.large') {
-        console.error('Payload size error:', {
-          limit: MAX_BODY_SIZE,
-          received: contentLength,
-          type: contentType
-        });
-        throw new Error(`Payload size exceeds limit of ${MAX_BODY_SIZE}`);
-      }
-      throw error;
-    }
+    return rawBody;
   } catch (error) {
-    console.error('Error processing request body:', {
+    console.error('Error reading raw body:', {
       error: error.message,
-      stack: error.stack,
-      headers: {
-        'content-type': req.headers['content-type'],
-        'content-length': req.headers['content-length']
-      }
+      headers: req.headers
     });
     throw error;
   }
@@ -309,112 +276,51 @@ const handler = async (req, res) => {
   const requestId = crypto.randomBytes(4).toString('hex');
   const timestamp = new Date().toISOString();
 
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Credentials', true);
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Neynar-Signature');
-
-  // Handle OPTIONS request
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  // Health check endpoint
-  if (req.method === 'GET') {
-    const memory = process.memoryUsage();
-    return res.status(200).json({
-      status: 'ok',
-      timestamp,
-      environment: process.env.NODE_ENV || 'development',
-      deployment: {
-        vercel: {
-          environment: process.env.VERCEL_ENV || 'development',
-          region: process.env.VERCEL_REGION || 'local',
-          deploymentUrl: process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000',
-        }
-      },
-      memory: {
-        heapUsed: Math.round(memory.heapUsed / 1024 / 1024) + 'MB',
-        heapTotal: Math.round(memory.heapTotal / 1024 / 1024) + 'MB',
-      },
-      config: {
-        hasNeynarKey: !!process.env.NEYNAR_API_KEY,
-        hasSignerUuid: !!process.env.SIGNER_UUID,
-        hasOpenAIKey: !!process.env.OPENAI_API_KEY,
-        hasWebhookSecret: !!process.env.WEBHOOK_SECRET,
-        botConfig: {
-          username: process.env.BOT_USERNAME,
-          fid: process.env.BOT_FID
-        }
-      }
-    });
-  }
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ message: 'Method not allowed' });
-  }
-
-  console.log('Processing webhook:', {
-    requestId,
-    timestamp,
-    type: req.body?.type,
-    data: req.body?.data ? {
-      hash: req.body.data.hash,
-      text: req.body.data.text?.substring(0, 50) + '...',
-      author: req.body.data?.author?.username,
-      mentioned_profiles: req.body.data.mentioned_profiles
-    } : null
-  });
-
   try {
+    // Enable CORS
+    res.setHeader('Access-Control-Allow-Credentials', true);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Neynar-Signature');
+
+    // Handle OPTIONS request
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
+    }
+
     // Verify signature in production
     if (process.env.NODE_ENV === 'production') {
       try {
         const signature = req.headers['x-neynar-signature'];
-        const contentType = req.headers['content-type'] || CONTENT_TYPES.JSON;
+        const rawBody = await getRequestBody(req);
         
-        let rawBody;
-        try {
-          rawBody = await getRequestBody(req);
-        } catch (error) {
-          if (error.message.includes('Payload size exceeds limit')) {
-            return res.status(413).json({
-              error: 'Payload too large',
-              limit: MAX_BODY_SIZE
-            });
-          }
-          throw error;
-        }
+        console.log('Webhook request received:', {
+          requestId,
+          method: req.method,
+          contentType: req.headers['content-type'],
+          hasSignature: !!signature,
+          bodyLength: rawBody?.length
+        });
 
         if (!verifySignature(signature, rawBody)) {
-          return res.status(401).json({
+          return res.status(401).json({ 
             error: 'Invalid signature',
-            requestId,
-            timestamp: new Date().toISOString(),
-            debug: {
-              hasSignature: !!signature,
-              bodyLength: rawBody?.length,
-              contentType
-            }
+            requestId 
           });
         }
 
-        // Parse body based on content type
+        // Parse the body after verification
         try {
-          if (contentType.includes(CONTENT_TYPES.JSON)) {
-            req.body = JSON.parse(rawBody.toString('utf8'));
-          } else if (contentType.includes(CONTENT_TYPES.FORM)) {
-            const params = new URLSearchParams(rawBody.toString('utf8'));
-            req.body = Object.fromEntries(params);
-          }
-        } catch (error) {
+          req.body = JSON.parse(rawBody.toString('utf8'));
+        } catch (parseError) {
           console.error('Body parsing error:', {
-            error: error.message,
-            contentType,
-            bodyPreview: rawBody.toString('utf8').substring(0, 100)
+            error: parseError.message,
+            requestId
           });
-          return res.status(400).json({ error: 'Invalid request body' });
+          return res.status(400).json({ 
+            error: 'Invalid JSON body',
+            requestId
+          });
         }
       } catch (error) {
         console.error('Webhook processing error:', {
@@ -422,7 +328,11 @@ const handler = async (req, res) => {
           stack: error.stack,
           requestId
         });
-        return res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ 
+          error: 'Webhook processing failed',
+          requestId,
+          message: error.message
+        });
       }
     }
 
@@ -481,21 +391,15 @@ const handler = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Webhook handler error:', {
-      requestId,
-      timestamp,
-      error: error instanceof Error ? {
-        name: error.name,
-        message: error.message,
-        stack: error.stack
-      } : String(error)
+    console.error('Handler error:', {
+      error: error.message,
+      stack: error.stack,
+      requestId
     });
-    
     return res.status(500).json({ 
       error: 'Internal server error',
-      message: process.env.NODE_ENV === 'development' ? 
-        error instanceof Error ? error.message : String(error) : 
-        undefined
+      requestId,
+      message: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
