@@ -1,63 +1,74 @@
 const crypto = require("crypto");
 const rawBody = require("raw-body");
 
-// Helper to verify signature
-const verifyWebhookSignature = (req, secret) => {
-  const signature = req.headers["x-neynar-signature"];
-  if (!signature || !secret) throw new Error("Invalid signature or missing secret");
+// Notification function (Optional, replace with your service)
+async function sendNotification(message) {
+  console.log(`📧 Notification: ${message}`);
+  // Implement logic for notifications here (e.g., send to Slack, email, etc.)
+}
 
-  const body = req.rawBody || "";
-  const hmac = crypto.createHmac("sha256", secret).update(body).digest("hex");
-
-  if (!crypto.timingSafeEqual(Buffer.from(signature, "hex"), Buffer.from(hmac, "hex"))) {
-    throw new Error("Signature mismatch");
+// Debug logger
+const debugLog = (message, data = null) => {
+  if (process.env.DEBUG_MODE === "true") {
+    console.log(`[DEBUG] ${message}`, data || "");
   }
 };
 
+// Webhook handler
 module.exports = async (req, res) => {
+  const timestamp = new Date().toISOString();
+  console.log(`📩 [${timestamp}] Incoming Request: ${req.method} ${req.url}`);
+
+  // Health check endpoint
+  if (req.method === "GET") {
+    return res.status(200).json({ status: "ok", message: "Webhook server is running" });
+  }
+
+  if (req.method !== "POST") {
+    console.warn(`⚠️ [${timestamp}] Method Not Allowed: ${req.method}`);
+    return res.status(405).json({ error: "Only POST method is allowed" });
+  }
+
+  const signature = req.headers["x-neynar-signature"];
+  const secret = process.env.WEBHOOK_SECRET;
+
+  if (!signature || !secret) {
+    console.error(`🚨 [${timestamp}] Missing Signature or Secret`);
+    return res.status(401).json({ error: "Invalid signature" });
+  }
+
   try {
-    // Ensure the method is POST
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Only POST method is allowed" });
-    }
+    // Read and verify the raw body
+    const body = await rawBody(req);
+    const hmac = crypto.createHmac("sha256", secret).update(body).digest("hex");
 
-    // Parse raw body and make it available for signature verification
-    req.rawBody = await rawBody(req);
+    if (
+      crypto.timingSafeEqual(
+        Buffer.from(signature, "hex"),
+        Buffer.from(hmac, "hex")
+      )
+    ) {
+      const parsedBody = JSON.parse(body);
+      console.log(`✅ [${timestamp}] Signature Verified`);
+      debugLog("Payload Received", parsedBody);
 
-    // Retrieve and validate environment variables
-    const secret = process.env.WEBHOOK_SECRET;
-    if (!secret) {
-      console.error("🚨 WEBHOOK_SECRET is not set in environment variables.");
-      return res.status(500).json({ error: "Server configuration error" });
-    }
-
-    // Verify signature
-    try {
-      verifyWebhookSignature(req, secret);
-    } catch (error) {
-      console.error("❌ Signature validation failed:", error.message);
-      return res.status(401).json({ error: error.message });
-    }
-
-    // Route to the appropriate API based on the URL
-    const urlPath = req.url;
-    console.log(`📩 Incoming request: ${req.method} ${urlPath}`);
-
-    if (urlPath === "/api/endpoint1") {
-      // Logic for Endpoint 1
-      return res.status(200).json({ message: "Endpoint 1 handled successfully" });
-    } else if (urlPath === "/api/endpoint2") {
-      // Logic for Endpoint 2
-      return res.status(200).json({ message: "Endpoint 2 handled successfully" });
-    } else if (urlPath === "/api/endpoint3") {
-      // Logic for Endpoint 3
-      return res.status(200).json({ message: "Endpoint 3 handled successfully" });
+      // Respond with success
+      return res.status(200).json({ status: "success", data: parsedBody });
     } else {
-      console.warn(`⚠️ Unknown API path: ${urlPath}`);
-      return res.status(404).json({ error: "Endpoint not found" });
+      console.error(`❌ [${timestamp}] Signature Mismatch`);
+      debugLog("Expected HMAC", hmac);
+      debugLog("Provided Signature", signature);
+
+      // Optional: Notify about the mismatch
+      await sendNotification("Webhook Signature Mismatch Detected");
+      return res.status(401).json({ error: "Signature mismatch" });
     }
   } catch (err) {
-    console.error("❌ Unexpected error:", err);
+    console.error(`🔥 [${timestamp}] Internal Server Error: ${err.message}`);
+    console.error(err.stack);
+
+    // Optional: Notify about the error
+    await sendNotification(`Webhook Server Error: ${err.message}`);
     return res.status(500).json({ error: "Internal server error" });
   }
 };
