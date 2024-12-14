@@ -11,7 +11,8 @@
     "openai": "^4.0.0",
     "quick-lru": "^7.0.0",
     "raw-body": "^2.5.2",
-    "winston": "^3.8.2"
+    "winston": "^3.8.2",
+    "@neynar/nodejs-sdk": "^1.0.0" 
   },
   "scripts": {
     "build": "tsc",
