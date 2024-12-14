@@ -1,74 +1,133 @@
-const crypto = require("crypto");
-const rawBody = require("raw-body");
+import * as crypto from "crypto";
+import rawBody from "raw-body";
+import { IncomingMessage, ServerResponse } from "http";
+import { NeynarAPIClient, Configuration } from "@neynar/nodejs-sdk";
+import OpenAI from "openai";
+import winston from "winston";
 
-// Notification function (Optional, replace with your service)
-async function sendNotification(message) {
-  console.log(`📧 Notification: ${message}`);
-  // Implement logic for notifications here (e.g., send to Slack, email, etc.)
-}
-
-// Debug logger
-const debugLog = (message, data = null) => {
-  if (process.env.DEBUG_MODE === "true") {
-    console.log(`[DEBUG] ${message}`, data || "");
-  }
+export const config = {
+  api: {
+    bodyParser: false, // Disable Next.js built-in body parsing
+  },
 };
 
-// Webhook handler
-module.exports = async (req, res) => {
-  const timestamp = new Date().toISOString();
-  console.log(`📩 [${timestamp}] Incoming Request: ${req.method} ${req.url}`);
+// Environment variable validation
+const requiredEnvVars = [
+  "OPENAI_API_KEY",
+  "NEYNAR_API_KEY",
+  "BOT_USERNAME",
+  "BOT_FID",
+  "WEBHOOK_SECRET",
+  "SIGNER_UUID",
+];
+const missingEnvVars = requiredEnvVars.filter((env) => !process.env[env]);
+if (missingEnvVars.length > 0) {
+  throw new Error(
+    `Missing environment variables: ${missingEnvVars.join(", ")}`
+  );
+}
 
-  // Health check endpoint
-  if (req.method === "GET") {
-    return res.status(200).json({ status: "ok", message: "Webhook server is running" });
+// Initialize logging
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || "info",
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.Console(), // Send logs to console for Vercel
+  ],
+});
+
+// Initialize clients
+const neynar = new NeynarAPIClient({
+  apiKey: process.env.NEYNAR_API_KEY || "",
+});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "" });
+
+// HMAC signature verification
+function verifySignature(req: IncomingMessage, rawBody: Buffer): boolean {
+  const signature = req.headers["x-neynar-signature"] as string | undefined;
+  const webhookSecret = process.env.WEBHOOK_SECRET;
+
+  if (!signature) {
+    logger.warn("Missing signature in headers");
+    return false;
   }
 
-  if (req.method !== "POST") {
-    console.warn(`⚠️ [${timestamp}] Method Not Allowed: ${req.method}`);
-    return res.status(405).json({ error: "Only POST method is allowed" });
-  }
-
-  const signature = req.headers["x-neynar-signature"];
-  const secret = process.env.WEBHOOK_SECRET;
-
-  if (!signature || !secret) {
-    console.error(`🚨 [${timestamp}] Missing Signature or Secret`);
-    return res.status(401).json({ error: "Invalid signature" });
+  if (!webhookSecret) {
+    logger.warn("Missing webhook secret in environment variables");
+    return false;
   }
 
   try {
-    // Read and verify the raw body
+    const hmac = crypto.createHmac("sha256", webhookSecret);
+    const computedSignature = hmac.update(rawBody).digest("hex");
+    return crypto.timingSafeEqual(
+      Buffer.from(signature, "hex"),
+      Buffer.from(computedSignature, "hex")
+    );
+  } catch (err) {
+    logger.error("Error verifying signature", { error: err });
+    return false;
+  }
+}
+
+// Main webhook handler
+export default async function handler(
+  req: IncomingMessage,
+  res: ServerResponse
+) {
+  const timestamp = new Date().toISOString();
+  logger.info(`Incoming request: ${req.method} ${req.url}`, { timestamp });
+
+  if (req.method !== "POST") {
+    logger.warn("Invalid HTTP method", { method: req.method });
+    res.statusCode = 405;
+    res.end(JSON.stringify({ error: "Only POST method is allowed" }));
+    return;
+  }
+
+  try {
+    // Parse raw body
     const body = await rawBody(req);
-    const hmac = crypto.createHmac("sha256", secret).update(body).digest("hex");
 
-    if (
-      crypto.timingSafeEqual(
-        Buffer.from(signature, "hex"),
-        Buffer.from(hmac, "hex")
-      )
-    ) {
-      const parsedBody = JSON.parse(body);
-      console.log(`✅ [${timestamp}] Signature Verified`);
-      debugLog("Payload Received", parsedBody);
+    // Verify the request signature
+    if (!verifySignature(req, body)) {
+      logger.warn("Invalid signature");
+      res.statusCode = 401;
+      res.end(JSON.stringify({ error: "Invalid signature" }));
+      return;
+    }
 
-      // Respond with success
-      return res.status(200).json({ status: "success", data: parsedBody });
-    } else {
-      console.error(`❌ [${timestamp}] Signature Mismatch`);
-      debugLog("Expected HMAC", hmac);
-      debugLog("Provided Signature", signature);
+    // Process the webhook data
+    const payload = JSON.parse(body.toString("utf8"));
+    logger.info("Webhook payload received", { payload });
 
-      // Optional: Notify about the mismatch
-      await sendNotification("Webhook Signature Mismatch Detected");
-      return res.status(401).json({ error: "Signature mismatch" });
+    // Respond to Neynar with success
+    res.statusCode = 200;
+    res.end(JSON.stringify({ status: "success", data: payload }));
+
+    // Example Neynar usage
+    if (payload.action === "cast") {
+      await neynar.casts.create({
+        text: `Hello from ${process.env.BOT_USERNAME}!`,
+      });
+      logger.info("Cast created successfully");
+    }
+
+    // Example OpenAI usage
+    if (payload.action === "ai_prompt") {
+      const aiResponse = await openai.chat.completions.create({
+        model: "gpt-4",
+        messages: [{ role: "user", content: payload.prompt }],
+      });
+      logger.info("AI Response", { aiResponse });
     }
   } catch (err) {
-    console.error(`🔥 [${timestamp}] Internal Server Error: ${err.message}`);
-    console.error(err.stack);
+    logger.error("Error processing webhook", { error: err });
 
-    // Optional: Notify about the error
-    await sendNotification(`Webhook Server Error: ${err.message}`);
-    return res.status(500).json({ error: "Internal server error" });
+    res.statusCode = 500;
+    res.end(JSON.stringify({ error: "Internal server error" }));
   }
-};
+}
