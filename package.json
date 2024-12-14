@@ -1,34 +1,28 @@
 {
-  "version": 2,
-  "functions": {
-    "api/*.ts": {
-      "runtime": "@vercel/node@22.x",
-      "memory": 1024,
-      "maxDuration": 60
-    },
-    "api/*.js": {
-      "runtime": "@vercel/node@22.x"
-    }
+  "name": "agent-mienfoo",
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": "22.x"
   },
-  "buildCommand": "npm run build",
-  "devCommand": "npm run dev",
-  "installCommand": "npm install",
-  "headers": [
-    {
-      "source": "/api/(.*)",
-      "headers": [
-        { "key": "Access-Control-Allow-Origin", "value": "*" },
-        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
-        { "key": "Access-Control-Allow-Headers", "value": "X-Neynar-Signature, Content-Type" }
-      ]
-    }
-  ],
-  "rewrites": [
-    { "source": "/api/webhook", "destination": "/api/webhook" },
-    { "source": "/api/health", "destination": "/api/health" },
-    { "source": "/api/(.*)", "destination": "/api/$1" }
-  ],
-  "env": {
-    "NODE_ENV": "production"
+  "main": "index.js",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "openai": "^4.0.0",
+    "quick-lru": "^7.0.0",
+    "raw-body": "^2.5.2",
+    "winston": "^3.8.2"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node server.js",
+    "dev": "vercel dev"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.17.0",
+    "globals": "^15.13.0",
+    "typescript-eslint": "^8.18.0"
   }
 }

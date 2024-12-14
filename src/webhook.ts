@@ -1,171 +1,63 @@
-import * as crypto from "crypto";
-import rawBody from "raw-body";
-import { IncomingMessage, ServerResponse } from "http";
-import { NeynarAPIClient, Configuration } from "@neynar/nodejs-sdk";
-import OpenAI from "openai";
-import winston from "winston";
+const crypto = require("crypto");
+const rawBody = require("raw-body");
 
-export const config = {
-  api: {
-    bodyParser: false, // Disable Next.js built-in body parsing
-  },
+// Helper to verify signature
+const verifyWebhookSignature = (req, secret) => {
+  const signature = req.headers["x-neynar-signature"];
+  if (!signature || !secret) throw new Error("Invalid signature or missing secret");
+
+  const body = req.rawBody || "";
+  const hmac = crypto.createHmac("sha256", secret).update(body).digest("hex");
+
+  if (!crypto.timingSafeEqual(Buffer.from(signature, "hex"), Buffer.from(hmac, "hex"))) {
+    throw new Error("Signature mismatch");
+  }
 };
 
-// Environment variable validation
-const requiredEnvVars = [
-  "OPENAI_API_KEY",
-  "NEYNAR_API_KEY",
-  "BOT_USERNAME",
-  "BOT_FID",
-  "WEBHOOK_SECRET",
-  "SIGNER_UUID",
-];
-const missingEnvVars = requiredEnvVars.filter((env) => !process.env[env]);
-if (missingEnvVars.length > 0) {
-  throw new Error(
-    `Missing environment variables: ${missingEnvVars.join(", ")}`
-  );
-}
-
-// Initialize logging
-const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || "info",
-  format: winston.format.json(),
-  transports: [
-    new winston.transports.Console(), // Send logs to console for Vercel
-  ],
-});
-
-// Initialize clients
-const neynar = new NeynarAPIClient({
-  apiKey: process.env.NEYNAR_API_KEY || "",
-});
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "" });
-
-// HMAC signature verification
-function verifySignature(req: IncomingMessage, rawBody: Buffer): boolean {
-  const signature = req.headers["x-neynar-signature"] as string | undefined;
-  const webhookSecret = process.env.WEBHOOK_SECRET;
-
-  if (!signature) {
-    logger.warn("Missing signature in headers");
-    return false;
-  }
-
-  if (!webhookSecret) {
-    logger.warn("Missing webhook secret in environment variables");
-    return false;
-  }
-
+module.exports = async (req, res) => {
   try {
-    const hmac = crypto.createHmac("sha256", webhookSecret);
-    const computedSignature = hmac.update(rawBody).digest("hex");
-
-    const isValid = crypto.timingSafeEqual(
-      Buffer.from(signature, "hex"),
-      Buffer.from(computedSignature, "hex")
-    );
-
-    if (!isValid) {
-      logger.warn("Invalid signature", {
-        provided: signature,
-        expected: computedSignature,
-      });
-    }
-
-    return isValid;
-  } catch (error) {
-    logger.error("Error verifying signature", { error });
-    return false;
-  }
-}
-
-// Generate bot response
-async function generateBotResponse(text: string): Promise<string> {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4",
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are Mienfoo, a knowledgeable and enthusiastic collector bot.",
-      },
-      { role: "user", content: text },
-    ],
-  });
-  return (
-    response.choices[0]?.message?.content ||
-    "I'm not sure how to respond to that."
-  );
-}
-
-// Main webhook handler
-export default async function handler(
-  req: IncomingMessage,
-  res: ServerResponse
-): Promise<void> {
-  logger.info("Incoming request", { method: req.method, url: req.url });
-
-  try {
-    // Allow only POST requests
+    // Ensure the method is POST
     if (req.method !== "POST") {
-      logger.warn("Method not allowed", { method: req.method });
-      res.writeHead(405, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Only POST method is allowed" }));
-      return;
+      return res.status(405).json({ error: "Only POST method is allowed" });
     }
 
-    // Read the raw body
-    const raw = await rawBody(req);
-    logger.debug("Raw body received", { rawBody: raw.toString() });
+    // Parse raw body and make it available for signature verification
+    req.rawBody = await rawBody(req);
 
-    // Verify the signature
-    if (!verifySignature(req, raw)) {
-      logger.warn("Invalid signature");
-      res.writeHead(401, { "Content-Type": "text/html" });
-      res.end(
-        "<!doctype html><html><body><h1>401 Unauthorized</h1><p>Invalid signature.</p></body></html>"
-      );
-      return;
+    // Retrieve and validate environment variables
+    const secret = process.env.WEBHOOK_SECRET;
+    if (!secret) {
+      console.error("🚨 WEBHOOK_SECRET is not set in environment variables.");
+      return res.status(500).json({ error: "Server configuration error" });
     }
 
-    // Parse JSON body
-    const body = JSON.parse(raw.toString());
-    logger.debug("Parsed body", body);
-
-    if (body.type !== "cast.created") {
-      logger.info("Event ignored", { reason: "not a cast event" });
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({ status: "ignored", reason: "not a cast event" })
-      );
-      return;
+    // Verify signature
+    try {
+      verifyWebhookSignature(req, secret);
+    } catch (error) {
+      console.error("❌ Signature validation failed:", error.message);
+      return res.status(401).json({ error: error.message });
     }
 
-    const cast = body.data;
-    if (!cast.text.includes(`@${process.env.BOT_USERNAME}`)) {
-      logger.info("Bot not mentioned", { cast: cast.text });
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({ status: "ignored", reason: "bot not mentioned" })
-      );
-      return;
+    // Route to the appropriate API based on the URL
+    const urlPath = req.url;
+    console.log(`📩 Incoming request: ${req.method} ${urlPath}`);
+
+    if (urlPath === "/api/endpoint1") {
+      // Logic for Endpoint 1
+      return res.status(200).json({ message: "Endpoint 1 handled successfully" });
+    } else if (urlPath === "/api/endpoint2") {
+      // Logic for Endpoint 2
+      return res.status(200).json({ message: "Endpoint 2 handled successfully" });
+    } else if (urlPath === "/api/endpoint3") {
+      // Logic for Endpoint 3
+      return res.status(200).json({ message: "Endpoint 3 handled successfully" });
+    } else {
+      console.warn(`⚠️ Unknown API path: ${urlPath}`);
+      return res.status(404).json({ error: "Endpoint not found" });
     }
-
-    const response = await generateBotResponse(cast.text);
-    logger.debug("Generated response", { response });
-
-    await neynar.publishCast({
-      signerUuid: process.env.SIGNER_UUID || "",
-      text: `@${cast.author.username} ${response}`,
-      parent: cast.hash,
-    });
-
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "success" }));
-  } catch (error) {
-    logger.error("Error handling webhook:", error);
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Internal Server Error" }));
+  } catch (err) {
+    console.error("❌ Unexpected error:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
-}
+};
